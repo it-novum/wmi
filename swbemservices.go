@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"golang.org/x/sys/windows"
 )
 
 // SWbemServices is used to access wmi. See https://msdn.microsoft.com/en-us/library/aa393719(v=vs.85).aspx
@@ -29,6 +30,8 @@ type queryRequest struct {
 	args     []interface{}
 	finished chan error
 }
+
+var coInitMapSwb = make(map[uint32]struct{})
 
 // InitializeSWbemServices will return a new SWbemServices object that can be used to query WMI
 func InitializeSWbemServices(c *Client, connectServerArgs ...interface{}) (*SWbemServices, error) {
@@ -78,16 +81,18 @@ func (s *SWbemServices) process(initError chan error) {
 	//All OLE/WMI calls must happen on the same initialized thead, so lock this goroutine
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-
-	err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
-	if err != nil {
-		oleCode := err.(*ole.OleError).Code()
-		if oleCode != ole.S_OK && oleCode != S_FALSE {
-			initError <- fmt.Errorf("ole.CoInitializeEx error: %v", err)
-			return
+	id := windows.GetCurrentThreadId()
+	if _, found := coInitMapSwb[id]; !found {
+		err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
+		if err != nil {
+			oleCode := err.(*ole.OleError).Code()
+			if oleCode != ole.S_OK && oleCode != S_FALSE {
+				initError <- fmt.Errorf("ole.CoInitializeEx error: %v", err)
+				return
+			}
 		}
+		coInitMapSwb[id] = struct{}{}
 	}
-	defer ole.CoUninitialize()
 
 	unknown, err := oleutil.CreateObject("WbemScripting.SWbemLocator")
 	if err != nil {
@@ -106,8 +111,9 @@ func (s *SWbemServices) process(initError chan error) {
 		return
 	}
 	defer dispatch.Release()
-	s.sWbemLocatorIDispatch = dispatch
 
+	s.sWbemLocatorIDispatch = dispatch
+	runtime.GC()
 	// we can't do the ConnectServer call outside the loop unless we find a way to track and re-init the connectServerArgs
 	//fmt.Println("process: initialized. closing initError")
 	close(initError)
